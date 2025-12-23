@@ -1,0 +1,12 @@
+[submodule "submodules/diff-gaussian-rasterization"]
+	path = submodules/diff-gaussian-rasterization
+	url = https://github.com/graphdeco-inria/diff-gaussian-rasterization.git
+[submodule "submodules/simple-knn"]
+	path = submodules/simple-knn
+	url = https://github.com/camenduru/simple-knn.git
+[submodule "submodules/envlight"]
+	path = submodules/envlight
+	url = https://github.com/ashawkey/envlight.git
+[submodule "submodules/nvdiffrast"]
+	path = submodules/nvdiffrast
+	url = https://github.com/NVlabs/nvdiffrast.git

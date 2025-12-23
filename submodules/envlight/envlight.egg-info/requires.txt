@@ -1,4 +1,0 @@
-numpy
-scipy
-ninja
-imageio>=2.28.0
