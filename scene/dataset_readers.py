@@ -35,6 +35,7 @@ class CameraInfo(NamedTuple):
     width: int
     height: int
     exposure: float
+    gbuffers: dict = None
 
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
@@ -99,8 +100,25 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
         image_name = os.path.basename(image_path).split(".")[0]
         image = Image.open(image_path)
 
+        gbuffers = {}
+        gbuffers_folder = os.path.join(os.path.dirname(images_folder), "gbuffers")
+        if os.path.exists(gbuffers_folder):
+            img_idx = int(image_name)
+            g_prefix = "0000.{:04d}".format(img_idx)
+            types = {
+                "albedo": "basecolor",
+                "normal": "normal",
+                "metallic": "metallic",
+                "roughness": "roughness"
+            }
+            for key_name, suffix in types.items():
+                g_path = os.path.join(gbuffers_folder, f"{g_prefix}.{suffix}.png")
+                if os.path.exists(g_path):
+                    gbuffers[key_name] = Image.open(g_path)
+
+
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
-                              image_path=image_path, image_name=image_name, width=width, height=height, exposure=0.0)
+                              image_path=image_path, image_name=image_name, width=width, height=height, exposure=0.0, gbuffers=gbuffers)
         cam_infos.append(cam_info)
     sys.stdout.write('\n')
     return cam_infos
