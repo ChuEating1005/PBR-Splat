@@ -36,6 +36,7 @@ class CameraInfo(NamedTuple):
     height: int
     exposure: float
     gbuffers: dict = None
+    mask: np.array = None
 
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
@@ -116,9 +117,17 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
                 if os.path.exists(g_path):
                     gbuffers[key_name] = Image.open(g_path)
 
+        # Load mask if available
+        mask = None
+        masks_folder = os.path.join(os.path.dirname(images_folder), "masks")
+        if os.path.exists(masks_folder):
+            img_idx = int(image_name)
+            mask_path = os.path.join(masks_folder, f"{img_idx:05d}.png")
+            if os.path.exists(mask_path):
+                mask = Image.open(mask_path)
 
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
-                              image_path=image_path, image_name=image_name, width=width, height=height, exposure=0.0, gbuffers=gbuffers)
+                              image_path=image_path, image_name=image_name, width=width, height=height, exposure=0.0, gbuffers=gbuffers, mask=mask)
         cam_infos.append(cam_info)
     sys.stdout.write('\n')
     return cam_infos
@@ -176,17 +185,26 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
     ply_path = os.path.join(path, "sparse/0/points3D.ply")
     bin_path = os.path.join(path, "sparse/0/points3D.bin")
     txt_path = os.path.join(path, "sparse/0/points3D.txt")
+    
+    pcd = None
     if not os.path.exists(ply_path):
         print("Converting point3d.bin to .ply, will happen only the first time you open the scene.")
         try:
             xyz, rgb, _ = read_points3D_binary(bin_path)
+            storePly(ply_path, xyz, rgb)
         except:
-            xyz, rgb, _ = read_points3D_text(txt_path)
-        storePly(ply_path, xyz, rgb)
-    try:
-        pcd = fetchPly(ply_path)
-    except:
-        pcd = None
+            try:
+                xyz, rgb, _ = read_points3D_text(txt_path)
+                storePly(ply_path, xyz, rgb)
+            except:
+                print("No points3D file found (bin/txt/ply). Will use checkpoint data if provided.")
+                pcd = None
+    
+    if pcd is None and os.path.exists(ply_path):
+        try:
+            pcd = fetchPly(ply_path)
+        except:
+            pcd = None
 
     scene_info = SceneInfo(point_cloud=pcd,
                            train_cameras=train_cam_infos,

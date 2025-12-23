@@ -18,7 +18,7 @@ class Camera(nn.Module):
     def __init__(self, colmap_id, R, T, FoVx, FoVy, image, gt_alpha_mask,
                  image_name, uid,
                  trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda", exposure=0.0,
-                 gbuffers=None
+                 gbuffers=None, mask=None
                  ):
         super(Camera, self).__init__()
 
@@ -51,6 +51,11 @@ class Camera(nn.Module):
         if gbuffers is not None:
             for key, tensor in gbuffers.items():
                 self.original_gbuffers[key] = tensor.to(self.data_device)
+        
+        # Store mask (foreground = 1, background = 0)
+        self.mask = None
+        if mask is not None:
+            self.mask = mask.to(self.data_device)
 
         self.zfar = 100.0
         self.znear = 0.01

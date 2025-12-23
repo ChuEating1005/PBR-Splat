@@ -49,8 +49,10 @@ class Scene:
             assert False, "Could not recognize scene type!"
 
         if not self.loaded_iter:
-            with open(scene_info.ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply") , 'wb') as dest_file:
-                dest_file.write(src_file.read())
+            # Only copy input.ply if it exists
+            if scene_info.ply_path and os.path.exists(scene_info.ply_path):
+                with open(scene_info.ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply") , 'wb') as dest_file:
+                    dest_file.write(src_file.read())
             json_cams = []
             camlist = []
             if scene_info.test_cameras:
@@ -83,7 +85,10 @@ class Scene:
                                                             "chkpnt" + str(self.loaded_iter) +
                                                             ".pth"))[0][-1])
         else:
-            self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
+            if scene_info.point_cloud is not None:
+                self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
+            else:
+                print("No point cloud available for initialization. Using pre-loaded checkpoint data.")
 
     def save(self, iteration):
         point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))

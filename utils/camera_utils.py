@@ -52,12 +52,20 @@ def loadCam(args, id, cam_info, resolution_scale):
     if cam_info.gbuffers is not None:
         for key, pil_img in cam_info.gbuffers.items():
             loaded_gbuffers[key] = PILtoTorch(pil_img, resolution)
+    
+    # Load mask if available
+    loaded_fg_mask = None
+    if cam_info.mask is not None:
+        mask_tensor = PILtoTorch(cam_info.mask, resolution)
+        # Convert to binary mask: foreground = 1, background = 0
+        # Assuming mask is grayscale where white = foreground
+        loaded_fg_mask = (mask_tensor[0:1, ...] > 0.5).float()
 
     return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
                   image=gt_image, gt_alpha_mask=loaded_mask,
                   image_name=cam_info.image_name, uid=id, data_device=args.data_device, exposure=cam_info.exposure,
-                  gbuffers=loaded_gbuffers)
+                  gbuffers=loaded_gbuffers, mask=loaded_fg_mask)
 
 def cameraList_from_camInfos(cam_infos, resolution_scale, args):
     camera_list = []

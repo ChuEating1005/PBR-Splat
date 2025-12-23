@@ -113,29 +113,61 @@ class GaussianModel:
         )
     
     def restore(self, model_args, training_args):
-        (self.active_sh_degree, 
-        self._xyz, 
-        self._features_dc, 
-        self._features_rest,
-        self._scaling, 
-        self._rotation, 
-        self._opacity,
-        self._albedo_init,
-        self._metallic,
-        self._roughness,
-        self.diffuse_occ,
-        self.grid,
-        self.max_pts,
-        self.min_pts,
-        self.max_radii2D, 
-        xyz_gradient_accum, 
-        denom,
-        opt_dict, 
-        self.spatial_lr_scale) = model_args
-        self.training_setup(training_args)
-        self.xyz_gradient_accum = xyz_gradient_accum
-        self.denom = denom
-        self.optimizer.load_state_dict(opt_dict)
+        if len(model_args) < 19:
+            print("Detected standard 3DGS checkpoint. Initializing extended attributes.")
+            (self.active_sh_degree, 
+            self._xyz, 
+            self._features_dc, 
+            self._features_rest,
+            self._scaling, 
+            self._rotation, 
+            self._opacity,
+            self.max_radii2D, 
+            xyz_gradient_accum, 
+            denom,
+            opt_dict, 
+            self.spatial_lr_scale) = model_args
+            
+            P = self._xyz.shape[0]
+            self._albedo_init = nn.Parameter(torch.rand(P, 3, device="cuda").requires_grad_(True))
+            self._metallic_init = nn.Parameter(torch.rand(P, 1, device="cuda").requires_grad_(True))
+            self._roughness_init = nn.Parameter(torch.rand(P, 1, device="cuda").requires_grad_(True))
+            self.diffuse_occ = torch.ones((P, self.diffuse_sample_num), device="cuda")
+            self.grid = torch.empty(0)
+            self.min_pts = torch.empty(0)
+            self.max_pts = torch.empty(0)
+            
+            self.training_setup(training_args)
+            self.xyz_gradient_accum = xyz_gradient_accum
+            self.denom = denom
+            print("Optimizer state not loaded due to parameter mismatch.")
+        else:
+            (self.active_sh_degree, 
+            self._xyz, 
+            self._features_dc, 
+            self._features_rest,
+            self._scaling, 
+            self._rotation, 
+            self._opacity,
+            self._albedo_init,
+            self._metallic_init,
+            self._roughness_init,
+            self.diffuse_occ,
+            self.grid,
+            self.max_pts,
+            self.min_pts,
+            self.max_radii2D, 
+            xyz_gradient_accum, 
+            denom,
+            opt_dict, 
+            self.spatial_lr_scale) = model_args
+            self.training_setup(training_args)
+            self.xyz_gradient_accum = xyz_gradient_accum
+            self.denom = denom
+            try:
+                self.optimizer.load_state_dict(opt_dict)
+            except Exception as e:
+                print(f"Failed to load optimizer state: {e}")
 
     @property
     def get_albedo_init(self):
@@ -488,11 +520,15 @@ class GaussianModel:
             {'params': [self._albedo_init], 'lr': training_args.albedo_lr_init, "name": "albedo_init"},
             {'params': [self._metallic_init], 'lr': training_args.material_lr_init, "name": "metallic_init"},
             {'params': [self._roughness_init], 'lr': training_args.material_lr_init, "name": "roughness_init"},
-            {'params': self.envlight.net.parameters(), 'lr': training_args.hdr_lr_init, "name": "hdr_net"},
-            {'params': [self.envlight.init_base], 'lr': training_args.hdr_lr_init, "name": "hdr_init_base"},
-            {'params': [self.envlight.base_train], 'lr': training_args.hdr_base_lr_init, "name": "hdr_base_train"},
-
         ]
+        
+        # Add envlight parameters only if they exist (not needed for G-buffer only training)
+        if hasattr(self.envlight, 'net'):
+            l.extend([
+                {'params': self.envlight.net.parameters(), 'lr': training_args.hdr_lr_init, "name": "hdr_net"},
+                {'params': [self.envlight.init_base], 'lr': training_args.hdr_lr_init, "name": "hdr_init_base"},
+                {'params': [self.envlight.base_train], 'lr': training_args.hdr_base_lr_init, "name": "hdr_base_train"},
+            ])
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
         self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
@@ -641,6 +677,72 @@ class GaussianModel:
         self._roughness_init = nn.Parameter(torch.tensor(roughness_init, dtype=torch.float, device="cuda").requires_grad_(True))
 
         self.active_sh_degree = self.max_sh_degree
+
+    def load_ply_standard_3dgs(self, path):
+        """
+        Load Gaussians from a standard 3DGS PLY checkpoint file (without PBR parameters).
+        This will load the basic Gaussian parameters and randomly initialize PBR parameters.
+        
+        Args:
+            path: Path to the PLY checkpoint file
+            
+        Returns:
+            Number of loaded Gaussians
+        """
+        print(f"Loading Gaussians from standard 3DGS PLY file: {path}")
+        plydata = PlyData.read(path)
+        
+        # Load positions
+        xyz = np.stack((np.asarray(plydata.elements[0]["x"]),
+                        np.asarray(plydata.elements[0]["y"]),
+                        np.asarray(plydata.elements[0]["z"])), axis=1)
+        opacities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis]
+        
+        # Load SH features
+        features_dc = np.zeros((xyz.shape[0], 3, 1))
+        features_dc[:, 0, 0] = np.asarray(plydata.elements[0]["f_dc_0"])
+        features_dc[:, 1, 0] = np.asarray(plydata.elements[0]["f_dc_1"])
+        features_dc[:, 2, 0] = np.asarray(plydata.elements[0]["f_dc_2"])
+        
+        extra_f_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("f_rest_")]
+        extra_f_names = sorted(extra_f_names, key=lambda x: int(x.split('_')[-1]))
+        features_extra = np.zeros((xyz.shape[0], len(extra_f_names)))
+        for idx, attr_name in enumerate(extra_f_names):
+            features_extra[:, idx] = np.asarray(plydata.elements[0][attr_name])
+        features_extra = features_extra.reshape((features_extra.shape[0], 3, (self.max_sh_degree + 1) ** 2 - 1))
+        
+        # Load scales and rotations
+        scale_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("scale_")]
+        scale_names = sorted(scale_names, key=lambda x: int(x.split('_')[-1]))
+        scales = np.zeros((xyz.shape[0], len(scale_names)))
+        for idx, attr_name in enumerate(scale_names):
+            scales[:, idx] = np.asarray(plydata.elements[0][attr_name])
+        
+        rot_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("rot")]
+        rot_names = sorted(rot_names, key=lambda x: int(x.split('_')[-1]))
+        rots = np.zeros((xyz.shape[0], len(rot_names)))
+        for idx, attr_name in enumerate(rot_names):
+            rots[:, idx] = np.asarray(plydata.elements[0][attr_name])
+        
+        # Set Gaussian parameters
+        self._xyz = nn.Parameter(torch.tensor(xyz, dtype=torch.float, device="cuda").requires_grad_(True))
+        self._features_dc = nn.Parameter(torch.tensor(features_dc, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
+        self._features_rest = nn.Parameter(torch.tensor(features_extra, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
+        self._opacity = nn.Parameter(torch.tensor(opacities, dtype=torch.float, device="cuda").requires_grad_(True))
+        self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
+        self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
+        
+        # Initialize PBR parameters randomly (standard 3DGS doesn't have these)
+        P = xyz.shape[0]
+        self._albedo_init = nn.Parameter(torch.rand(P, 3, device="cuda").requires_grad_(True))
+        self._metallic_init = nn.Parameter(torch.rand(P, 1, device="cuda").requires_grad_(True))
+        self._roughness_init = nn.Parameter(torch.rand(P, 1, device="cuda").requires_grad_(True))
+        self.diffuse_occ = torch.ones((P, self.diffuse_sample_num), device="cuda")
+        
+        self.active_sh_degree = self.max_sh_degree
+        print(f"Loaded {P} Gaussians from standard 3DGS checkpoint, initialized PBR parameters")
+        
+        return P
 
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}
