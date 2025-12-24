@@ -33,14 +33,15 @@ from envlight.utils import cubemap_to_latlong
 # G-buffer Loss Wrapper Function
 def compute_gbuffer_loss(rendered, gt, use_l2=False):
     """
-    Compute G-buffer loss combining L1/L2 and SSIM.
+    Compute G-buffer loss using L1 or L2.
     
     Args:
         rendered: Rendered G-buffer tensor
         gt: Ground truth G-buffer tensor
-        use_l2: If True, use L2 loss; otherwise use L1 loss    
+        use_l2: If True, use L2 loss; otherwise use L1 loss
+    
     Returns:
-        Combined loss value
+        Loss value
     """
     if use_l2:
         # L2 loss
@@ -51,7 +52,19 @@ def compute_gbuffer_loss(rendered, gt, use_l2=False):
     
     return loss
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint):
+def training(
+    dataset,
+    opt,
+    pipe,
+    testing_iterations,
+    saving_iterations,
+    checkpoint_iterations,
+    checkpoint,
+    smooth_normal_weight: float = 0.03,
+    smooth_albedo_weight: float = 0.05,
+    smooth_metallic_weight: float = 0.05,
+    smooth_roughness_weight: float = 0.05,
+):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
@@ -127,8 +140,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         loss_albedo = loss_normal = loss_metallic = loss_roughness = 0.0
         
         # Configuration: use L1 or L2 loss
-        use_l2_loss = True  # Set to True to use L2 loss instead of L1
-        ssim_weight = 0.2    # Weight for SSIM component
+        use_l2_loss = False  # Set to True to use L2 loss instead of L1
         
         if gt_gbuffers:
             # Apply mask to GT: set background to black (0)
@@ -139,40 +151,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     masked_gt_gbuffers[key] = gt * mask
                 
                 # Compute loss on full image (including black background)
-                if "albedo" in masked_gt_gbuffers:
-                    loss_albedo = compute_gbuffer_loss(rendered_albedo, masked_gt_gbuffers["albedo"], 
-                                                       use_l2=use_l2_loss)
-                    loss += loss_albedo
-                if "normal" in masked_gt_gbuffers:
-                    loss_normal = compute_gbuffer_loss(rendered_normal, masked_gt_gbuffers["normal"], 
-                                                       use_l2=use_l2_loss)
-                    loss += loss_normal
-                if "metallic" in masked_gt_gbuffers:
-                    loss_metallic = compute_gbuffer_loss(rendered_metallic, masked_gt_gbuffers["metallic"], 
-                                                         use_l2=use_l2_loss)
-                    loss += loss_metallic
-                if "roughness" in masked_gt_gbuffers:
-                    loss_roughness = compute_gbuffer_loss(rendered_roughness, masked_gt_gbuffers["roughness"], 
-                                                          use_l2=use_l2_loss)
-                    loss += loss_roughness
+                loss_albedo = compute_gbuffer_loss(rendered_albedo, masked_gt_gbuffers["albedo"], use_l2=use_l2_loss)
+                loss_normal = compute_gbuffer_loss(rendered_normal, masked_gt_gbuffers["normal"], use_l2=use_l2_loss)
+                loss_metallic = compute_gbuffer_loss(rendered_metallic, masked_gt_gbuffers["metallic"], use_l2=use_l2_loss)
+                loss_roughness = compute_gbuffer_loss(rendered_roughness, masked_gt_gbuffers["roughness"], use_l2=use_l2_loss)
+                loss = loss_albedo + loss_normal + loss_metallic + loss_roughness
             else:
                 # Fallback to regular loss if no mask
-                if "albedo" in gt_gbuffers:
-                    loss_albedo = compute_gbuffer_loss(rendered_albedo, gt_gbuffers["albedo"], 
-                                                       use_l2=use_l2_loss)
-                    loss += loss_albedo
-                if "normal" in gt_gbuffers:
-                    loss_normal = compute_gbuffer_loss(rendered_normal, gt_gbuffers["normal"], 
-                                                       use_l2=use_l2_loss)
-                    loss += loss_normal
-                if "metallic" in gt_gbuffers:
-                    loss_metallic = compute_gbuffer_loss(rendered_metallic, gt_gbuffers["metallic"], 
-                                                         use_l2=use_l2_loss)
-                    loss += loss_metallic
-                if "roughness" in gt_gbuffers:
-                    loss_roughness = compute_gbuffer_loss(rendered_roughness, gt_gbuffers["roughness"], 
-                                                          use_l2=use_l2_loss)
-                    loss += loss_roughness
+                loss_albedo = compute_gbuffer_loss(rendered_albedo, gt_gbuffers["albedo"], use_l2=use_l2_loss)
+                loss_normal = compute_gbuffer_loss(rendered_normal, gt_gbuffers["normal"], use_l2=use_l2_loss)
+                loss_metallic = compute_gbuffer_loss(rendered_metallic, gt_gbuffers["metallic"], use_l2=use_l2_loss)
+                loss_roughness = compute_gbuffer_loss(rendered_roughness, gt_gbuffers["roughness"], use_l2=use_l2_loss)
+                loss = loss_albedo + loss_normal + loss_metallic + loss_roughness
             
             # Log individual losses to tensorboard
             if iteration % 10 == 0 and tb_writer:
@@ -186,8 +176,46 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
              if iteration % 100 == 0:
                 print("Warning: No GT G-buffer found for current view.")
 
-        # Regularization (optional)
-        # loss += tv_loss(rendered_albedo) * 0.01 
+        # Regularization (optional, inspired by GIR stage2)
+        # These losses encourage smoother/less noisy G-buffer predictions.
+        reg_loss = 0.0
+        if mask is not None:
+            albedo_reg = rendered_albedo * mask
+            normal_reg = rendered_normal * mask
+            metallic_reg = rendered_metallic * mask
+            roughness_reg = rendered_roughness * mask
+        else:
+            albedo_reg = rendered_albedo
+            normal_reg = rendered_normal
+            metallic_reg = rendered_metallic
+            roughness_reg = rendered_roughness
+
+        # Prepare guide image for edge-aware smoothness
+        # Use original RGB image if available, otherwise rendered albedo
+        guide_img = None
+        if hasattr(viewpoint_cam, "original_image") and viewpoint_cam.original_image is not None:
+            guide_img = viewpoint_cam.original_image.cuda()
+            guide_img = guide_img[0:3, ...] if guide_img.shape[0] >= 3 else guide_img
+        else:
+            guide_img = rendered_albedo.detach()
+        
+        # Mask guide image if needed
+        if mask is not None:
+            guide_img = guide_img * mask
+
+        # Unsqueeze guide for smooth_loss which expects (B, C, H, W)
+        guide_img_batch = guide_img.unsqueeze(0)
+        
+        # Smoothness Losses (Edge-Aware)
+        reg_loss = reg_loss + smooth_loss(normal_reg.unsqueeze(0), guide_img_batch) * smooth_normal_weight
+        reg_loss = reg_loss + smooth_loss(albedo_reg.unsqueeze(0), guide_img_batch) * smooth_albedo_weight
+        reg_loss = reg_loss + smooth_loss(metallic_reg.unsqueeze(0), guide_img_batch) * smooth_metallic_weight
+        reg_loss = reg_loss + smooth_loss(roughness_reg.unsqueeze(0), guide_img_batch) * smooth_roughness_weight
+
+        if reg_loss != 0.0:
+            loss = loss + reg_loss
+            if iteration % 10 == 0 and tb_writer:
+                tb_writer.add_scalar('Loss/reg_total', reg_loss.item() if isinstance(reg_loss, torch.Tensor) else float(reg_loss), iteration)
 
         loss.backward()
         iter_end.record()
@@ -331,6 +359,12 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[5_000, 10_000, 20_000, 30_000, 40_000, 50_000, 60_000])
     parser.add_argument("--start_checkpoint", type=str, default = None)
+
+    # Optional regularization weights (inspired by GIR stage2) to encourage smoother G-buffers
+    parser.add_argument("--smooth_normal_weight", type=float, default=0.01)
+    parser.add_argument("--smooth_albedo_weight", type=float, default=0.0)
+    parser.add_argument("--smooth_metallic_weight", type=float, default=0.0)
+    parser.add_argument("--smooth_roughness_weight", type=float, default=0.0)
     
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
@@ -345,7 +379,19 @@ if __name__ == "__main__":
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     
     # We ignore first/second stage parameters as we are doing G-buffer training only
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint)
+    training(
+        lp.extract(args),
+        op.extract(args),
+        pp.extract(args),
+        args.test_iterations,
+        args.save_iterations,
+        args.checkpoint_iterations,
+        args.start_checkpoint,
+        smooth_normal_weight=args.smooth_normal_weight,
+        smooth_albedo_weight=args.smooth_albedo_weight,
+        smooth_metallic_weight=args.smooth_metallic_weight,
+        smooth_roughness_weight=args.smooth_roughness_weight,
+    )
 
     # All done
     print("\nTraining complete.")

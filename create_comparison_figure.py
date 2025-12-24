@@ -28,7 +28,7 @@ def create_comparison_figure(vis_dir, output_path=None):
         # Try masked GT first, then fallback to unmasked
         gt_path = os.path.join(vis_dir, f'gt_{gbuffer_type}_masked.png')
         if not os.path.exists(gt_path):
-            gt_path = os.path.join(vis_dir, f'gt_{gbuffer_type}.png')
+        gt_path = os.path.join(vis_dir, f'gt_{gbuffer_type}.png')
         
         rendered_path = os.path.join(vis_dir, f'rendered_{gbuffer_type}.png')
         
