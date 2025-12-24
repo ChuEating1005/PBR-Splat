@@ -160,7 +160,18 @@ class GaussianModel:
             xyz_gradient_accum, 
             denom,
             opt_dict, 
-            self.spatial_lr_scale) = model_args
+            self.spatial_lr_scale,
+            envlight_dict) = model_args
+            
+            # [Fix] Load EnvLight with strict=False to handle version mismatch (Texture vs Neural)
+            try:
+                # Remove 'base' from dict if present, as it conflicts with the non-parameter buffer in Neural EnvLight
+                # We copy to a new dict to ensure we are not modifying a read-only structure or affecting references
+                clean_envlight_dict = {k: v for k, v in envlight_dict.items() if k != 'base'}
+                self.envlight.load_state_dict(clean_envlight_dict, strict=False)
+            except Exception as e:
+                print(f"Warning: Failed to fully load envlight state_dict: {e}. This is expected if switching between Texture/Neural envlight versions. Proceeding for relighting.")
+
             self.training_setup(training_args)
             self.xyz_gradient_accum = xyz_gradient_accum
             self.denom = denom

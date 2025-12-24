@@ -81,9 +81,14 @@ class Scene:
                                                            "point_cloud",
                                                            "iteration_" + str(self.loaded_iter),
                                                            "point_cloud.ply"))
-            self.gaussians.envlight.load_state_dict(torch.load(os.path.join(self.model_path,
-                                                            "chkpnt" + str(self.loaded_iter) +
-                                                            ".pth"))[0][-1])
+            # [Fix] Handle legacy EnvLight checkpoints (Texture vs Neural mismatch)
+            try:
+                envlight_dict = torch.load(os.path.join(self.model_path, "chkpnt" + str(self.loaded_iter) + ".pth"))[0][-1]
+                # Filter out 'base' if present to avoid Unexpected Key error
+                clean_envlight_dict = {k: v for k, v in envlight_dict.items() if k != 'base'}
+                self.gaussians.envlight.load_state_dict(clean_envlight_dict, strict=False)
+            except Exception as e:
+                print(f"Warning: Failed to load envlight from checkpoint: {e}. This is expected if switching versions. Proceeding.")
         else:
             if scene_info.point_cloud is not None:
                 self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
